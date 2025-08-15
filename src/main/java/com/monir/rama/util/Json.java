@@ -12,7 +12,7 @@ public final class Json {
     public static Map<String,Object> readMap(InputStream is) throws Exception {
         return M.readValue(is, new TypeReference<Map<String,Object>>() {});
     }
-    static void write(OutputStream os, Object body) throws Exception {
+    public static void write(OutputStream os, Object body) throws Exception {
         M.writeValue(os, body);
     }
 }
