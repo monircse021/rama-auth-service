@@ -50,10 +50,10 @@ public class HttpMain {
 
             // --- Register
             http.createContext("/api/register", ex -> handlePost(ex, in -> {
-                String fullName = str(in.get("fullName"));
+                String fullName = str(in.getOrDefault("fullName", null));
                 String email    = str(in.get("email"));
                 String username = str(in.get("username"));
-                String mobile   = str(in.get("mobileNumber"));
+                String mobile   = str(in.getOrDefault("mobileNumber", null));
                 String password = str(in.get("password"));
                 require(nonEmpty(email), "email is required");
                 require(nonEmpty(username), "username is required");
@@ -69,7 +69,7 @@ public class HttpMain {
                 Map<String,Object> evt = new HashMap<>();
                 evt.put("type","RegisterRequested");
                 evt.put("fullName", fullName);
-                evt.put("email", email);
+                evt.put("email", emailLower);
                 evt.put("emailLower", emailLower);
                 evt.put("username", username);
                 evt.put("usernameLower", userLower);
@@ -77,15 +77,10 @@ public class HttpMain {
                 evt.put("pwdHash", pwdHash);
                 reg.append(evt);
 
-                // Wait until userId appears via username index
-                Object userId = waitFor(Duration.ofSeconds(5),
-                        () -> qUidByUsername.invoke(userLower));
+                Object userId = waitFor(Duration.ofSeconds(5), () -> qUidByUsername.invoke(userLower));
 
-                if (userId == null) {
-                    return Map.of("status","accepted");
-                }
+                if (userId == null) return Map.of("status","accepted");
 
-                // Issue tokens
                 String access = createAccessToken(secret, (String)userId, username, ACCESS_TTL_MS);
                 String refresh = createRefreshToken(secret, (String)userId, username, REFRESH_TTL_MS);
                 long expMillis = System.currentTimeMillis() + REFRESH_TTL_MS;
@@ -148,10 +143,9 @@ public class HttpMain {
                 Object userId = qValidateRef.invoke(refresh);
                 if (userId == null) return unauthorized("Invalid or expired refresh token");
 
-                String username = str(in.get("username"));
+                String username = str(in.get("username")); // optional from client for convenience
                 if (username == null) username = "user";
 
-                // Rotate refresh token
                 Map<String,Object> revoke = new HashMap<>();
                 revoke.put("type","RefreshTokenRevoke");
                 revoke.put("token", refresh);
@@ -176,13 +170,14 @@ public class HttpMain {
                 );
             }));
 
-            // --- Update user (fullName, email, mobile)
+            // --- Update user
             http.createContext("/api/user/update", ex -> handlePost(ex, in -> {
                 String uid      = str(in.get("userId"));
-                String fullName = str(in.get("fullName"));
-                String email    = str(in.get("email"));
-                String mobile   = str(in.get("mobileNumber"));
+                String fullName = str(in.getOrDefault("fullName", null));
+                String email    = str(in.getOrDefault("email", null));
+                String mobile   = str(in.getOrDefault("mobileNumber", null));
                 require(nonEmpty(uid), "userId is required");
+
                 if (email != null) {
                     String emailLower = AuthFns.lowerTrim(email);
                     Object existing = qUidByEmail.invoke(emailLower);
@@ -196,7 +191,6 @@ public class HttpMain {
                 if (fullName != null) evt.put("fullName", fullName);
                 if (mobile != null) evt.put("mobileNumber", mobile);
                 if (email != null) {
-                    evt.put("email", email);
                     evt.put("emailLower", AuthFns.lowerTrim(email));
                 }
                 reg.append(evt);
