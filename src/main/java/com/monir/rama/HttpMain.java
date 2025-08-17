@@ -18,22 +18,6 @@ import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 
-/**
- * HttpMain
- * ----------
- * Entry point for the Rama Authentication Service.
- * Provides REST-like HTTP APIs for:
- *   - User Registration
- *   - Login (with JWT access/refresh tokens)
- *   - Token Refresh
- *   - User Update
- *   - Logout
- *
- * Uses:
- *   - Rama InProcessCluster for event sourcing
- *   - Java built-in HttpServer
- *   - Custom JSON & JWT utilities
- */
 public class HttpMain {
 
     public static void main(String[] args) throws Exception {
@@ -50,28 +34,24 @@ public class HttpMain {
         long ACCESS_TTL_MS = Duration.ofMinutes(accessTtlMin).toMillis();
         long REFRESH_TTL_MS = Duration.ofDays(refreshTtlDays).toMillis();
 
-        // ====== Start Rama InProcessCluster ======
         try (InProcessCluster cluster = InProcessCluster.create()) {
             cluster.launchModule(new AuthModule(), new LaunchConfig(1, 1));
             System.out.println("AuthModule launched on InProcessCluster.");
 
-            // Rama Depots (event streams)
             Depot reg  = cluster.clusterDepot(AuthModule.class.getName(), "*registration_cmds");
             Depot auth = cluster.clusterDepot(AuthModule.class.getName(), "*auth_events");
 
-            // Rama Queries
             QueryTopologyClient<Object> qCanRegister   = cluster.clusterQuery(AuthModule.class.getName(), "canRegister");
             QueryTopologyClient<Object> qUidByEmail    = cluster.clusterQuery(AuthModule.class.getName(), "getUserIdByEmail");
             QueryTopologyClient<Object> qUidByUsername = cluster.clusterQuery(AuthModule.class.getName(), "getUserIdByUsername");
             QueryTopologyClient<Object> qCredForUser   = cluster.clusterQuery(AuthModule.class.getName(), "getCredForUser");
             QueryTopologyClient<Object> qValidateRef   = cluster.clusterQuery(AuthModule.class.getName(), "validateRefresh");
 
-            // ====== Start HTTP Server ======
             HttpServer http = HttpServer.create(new InetSocketAddress(port), 0);
             http.setExecutor(Executors.newCachedThreadPool());
 
             // --------------------------
-            // Register Endpoint
+            // Register
             // --------------------------
             http.createContext("/api/register", ex -> handlePost(ex, in -> {
                 String fullName = str(in.get("fullName"));
@@ -87,16 +67,13 @@ public class HttpMain {
                 String emailLower = AuthFns.lowerTrim(email);
                 String userLower  = AuthFns.lowerTrim(username);
 
-                // Check uniqueness of email + username
                 Boolean ok = (Boolean) qCanRegister.invoke(emailLower, userLower);
                 if (ok == null || !ok) {
                     return Map.of("status", "conflict", "error", "Email or username already taken");
                 }
 
-                // Hash password
                 String pwdHash = AuthFns.sha256Hex(password);
 
-                // Send event to Rama
                 Map<String,Object> evt = new HashMap<>();
                 evt.put("type","RegisterRequested");
                 evt.put("fullName", fullName);
@@ -108,7 +85,6 @@ public class HttpMain {
                 evt.put("pwdHash", pwdHash);
                 reg.append(evt);
 
-                // Wait until Rama indexes new user
                 Object userId = waitFor(Duration.ofSeconds(5),
                         () -> qUidByUsername.invoke(userLower));
 
@@ -120,7 +96,7 @@ public class HttpMain {
             }));
 
             // --------------------------
-            // Login Endpoint
+            // Login
             // --------------------------
             http.createContext("/api/login", ex -> handlePost(ex, in -> {
                 String username = str(in.get("username"));
@@ -135,16 +111,13 @@ public class HttpMain {
                 Map cred = (Map) qCredForUser.invoke(userId);
                 if (cred == null) return unauthorized("Invalid username or password");
 
-                // Compare hashes
                 String stored = String.valueOf(cred.get("hash"));
                 String cand   = AuthFns.sha256Hex(password);
                 if (!Objects.equals(stored, cand)) return unauthorized("Invalid username or password");
 
-                // Create tokens
                 String access = createAccessToken(secret, (String)userId, username, ACCESS_TTL_MS);
                 String refresh = createRefreshToken(secret, (String)userId, username, REFRESH_TTL_MS);
 
-                // Store refresh token event
                 long expMillis = System.currentTimeMillis() + REFRESH_TTL_MS;
                 Map<String,Object> tokEvt = new HashMap<>();
                 tokEvt.put("type","RefreshTokenUpsert");
@@ -163,7 +136,7 @@ public class HttpMain {
             }));
 
             // --------------------------
-            // Refresh Token Endpoint
+            // Refresh Token
             // --------------------------
             http.createContext("/api/token/refresh", ex -> handlePost(ex, in -> {
                 String refresh = str(in.get("refreshToken"));
@@ -175,13 +148,11 @@ public class HttpMain {
                 String username = str(in.get("username"));
                 if (username == null) username = "user";
 
-                // Revoke old refresh
                 Map<String,Object> revoke = new HashMap<>();
                 revoke.put("type","RefreshTokenRevoke");
                 revoke.put("token", refresh);
                 auth.append(revoke);
 
-                // Create new refresh
                 String newRefresh = createRefreshToken(secret, (String)userId, username, REFRESH_TTL_MS);
                 long expMillis = System.currentTimeMillis() + REFRESH_TTL_MS;
 
@@ -192,7 +163,6 @@ public class HttpMain {
                 upsert.put("expMillis", expMillis);
                 auth.append(upsert);
 
-                // New access token
                 String access = createAccessToken(secret, (String)userId, username, ACCESS_TTL_MS);
 
                 return Map.of(
@@ -205,7 +175,7 @@ public class HttpMain {
             }));
 
             // --------------------------
-            // Update User Endpoint
+            // Update User
             // --------------------------
             http.createContext("/api/user/update", ex -> handlePost(ex, in -> {
                 String uid      = str(in.get("userId"));
@@ -222,7 +192,6 @@ public class HttpMain {
                     }
                 }
 
-                // Emit update event
                 Map<String,Object> evt = new HashMap<>();
                 evt.put("type","UserUpdated");
                 evt.put("userId", uid);
@@ -235,7 +204,7 @@ public class HttpMain {
             }));
 
             // --------------------------
-            // Logout Endpoint
+            // Logout
             // --------------------------
             http.createContext("/api/logout", ex -> handlePost(ex, in -> {
                 String refresh = str(in.get("refreshToken"));
@@ -249,7 +218,6 @@ public class HttpMain {
                 return Map.of("status","logged_out");
             }));
 
-            // ====== Start HTTP Listener ======
             http.start();
             System.out.println("HTTP listening on http://localhost:" + port + "  (Ctrl+C to stop)");
             new CountDownLatch(1).await();
@@ -257,7 +225,7 @@ public class HttpMain {
     }
 
     // ======================================================================
-    // ========================== Helper Methods ============================
+    // Helpers
     // ======================================================================
 
     private static int parseIntEnv(String k, int def){
@@ -273,8 +241,12 @@ public class HttpMain {
     @FunctionalInterface
     interface BodyHandler { Map<String,Object> handle(Map<String,Object> in) throws Exception; }
 
-    /** Handles JSON POST requests safely */
+    /** Handles POST/OPTIONS safely with CORS */
     private static void handlePost(HttpExchange ex, BodyHandler fn) throws IOException {
+        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) {
+            handleOptions(ex);
+            return;
+        }
         if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { methodNotAllowed(ex, "POST"); return; }
         try {
             Map<String,Object> in = Json.readMap(ex.getRequestBody());
@@ -290,22 +262,36 @@ public class HttpMain {
         }
     }
 
-    /** Sends JSON response */
+    /** Preflight CORS response */
+    private static void handleOptions(HttpExchange ex) throws IOException {
+        addCors(ex);
+        ex.sendResponseHeaders(204, -1); // No body
+        ex.close();
+    }
+
+    /** JSON + CORS */
     private static void respond(HttpExchange ex, int status, Object body) throws IOException {
         byte[] bytes;
         try { bytes = Json.M.writeValueAsBytes(body); }
         catch (Exception e) { bytes = ("{\"error\":\"" + e.getMessage() + "\"}").getBytes(StandardCharsets.UTF_8); status = 500; }
         ex.getResponseHeaders().set("Content-Type", "application/json");
+        addCors(ex);
         ex.sendResponseHeaders(status, bytes.length);
         ex.getResponseBody().write(bytes);
         ex.close();
+    }
+
+    /** Add common CORS headers */
+    private static void addCors(HttpExchange ex) {
+        ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        ex.getResponseHeaders().add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        ex.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type, Authorization");
     }
 
     private static void methodNotAllowed(HttpExchange ex, String expected) throws IOException {
         respond(ex, 405, Map.of("error","Use " + expected));
     }
 
-    /** Waits until Supplier returns non-null or times out */
     private static Object waitFor(Duration timeout, SupplierThrowing<Object> sup) {
         long deadline = System.nanoTime() + timeout.toNanos();
         Object v = sup.get();
@@ -317,7 +303,6 @@ public class HttpMain {
     }
     @FunctionalInterface interface SupplierThrowing<T> { T get(); }
 
-    /** JWT token creator helpers */
     private static String createAccessToken(String secret, String userId, String username, long ttlMs){
         long now = System.currentTimeMillis();
         long exp = now + ttlMs;
@@ -348,6 +333,5 @@ public class HttpMain {
 
     private static class BadReq extends RuntimeException { BadReq(String m) { super(m); } }
     private static class Unauthorized extends RuntimeException { Unauthorized(String m) { super(m); } }
-
     private static void require(boolean ok, String msg) { if (!ok) throw new BadReq(msg); }
 }
