@@ -50,10 +50,10 @@ public class HttpMain {
 
             // --- Register
             http.createContext("/api/register", ex -> handlePost(ex, in -> {
-                String fullName = str(in.getOrDefault("fullName", null));
+                String fullName = str(in.get("fullName"));
                 String email    = str(in.get("email"));
                 String username = str(in.get("username"));
-                String mobile   = str(in.getOrDefault("mobileNumber", null));
+                String mobile   = str(in.get("mobileNumber"));
                 String password = str(in.get("password"));
                 require(nonEmpty(email), "email is required");
                 require(nonEmpty(username), "username is required");
@@ -69,7 +69,7 @@ public class HttpMain {
                 Map<String,Object> evt = new HashMap<>();
                 evt.put("type","RegisterRequested");
                 evt.put("fullName", fullName);
-                evt.put("email", emailLower);
+                evt.put("email", email);
                 evt.put("emailLower", emailLower);
                 evt.put("username", username);
                 evt.put("usernameLower", userLower);
@@ -77,28 +77,22 @@ public class HttpMain {
                 evt.put("pwdHash", pwdHash);
                 reg.append(evt);
 
-                Object userId = waitFor(Duration.ofSeconds(5), () -> qUidByUsername.invoke(userLower));
+                // Wait until userId appears via username index (briefly)
+                Object userId = waitFor(Duration.ofSeconds(5),
+                        () -> qUidByUsername.invoke(userLower));
 
-                if (userId == null) return Map.of("status","accepted");
-
-                String access = createAccessToken(secret, (String)userId, username, ACCESS_TTL_MS);
-                String refresh = createRefreshToken(secret, (String)userId, username, REFRESH_TTL_MS);
-                long expMillis = System.currentTimeMillis() + REFRESH_TTL_MS;
-                Map<String,Object> tokEvt = new HashMap<>();
-                tokEvt.put("type","RefreshTokenUpsert");
-                tokEvt.put("token", refresh);
-                tokEvt.put("userId", userId);
-                tokEvt.put("expMillis", expMillis);
-                auth.append(tokEvt);
+                if (userId == null) {
+                    // registration accepted but not yet indexed
+                    return Map.of("status","accepted");
+                }
 
                 return Map.of(
                         "status","created",
                         "userId", userId,
-                        "username", username,
-                        "accessToken", access,
-                        "refreshToken", refresh
+                        "fullName", fullName
                 );
             }));
+
 
             // --- Login
             http.createContext("/api/login", ex -> handlePost(ex, in -> {
