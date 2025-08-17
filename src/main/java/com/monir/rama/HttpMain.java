@@ -27,11 +27,11 @@ public class HttpMain {
             System.err.println("ERROR: JWT_SECRET env var is required.");
             System.exit(2);
         }
-        int accessTtlMin = parseIntEnv("ACCESS_TTL_MIN", 10);  // default: 10 minutes
+        int accessTtlMin   = parseIntEnv("ACCESS_TTL_MIN", 10);  // default: 10 minutes
         int refreshTtlDays = parseIntEnv("REFRESH_TTL_DAYS", 7); // default: 7 days
-        int port = parseIntEnv("PORT", 8080); // default: 8080
+        int port           = parseIntEnv("PORT", 8080);          // default: 8080
 
-        long ACCESS_TTL_MS = Duration.ofMinutes(accessTtlMin).toMillis();
+        long ACCESS_TTL_MS  = Duration.ofMinutes(accessTtlMin).toMillis();
         long REFRESH_TTL_MS = Duration.ofDays(refreshTtlDays).toMillis();
 
         try (InProcessCluster cluster = InProcessCluster.create()) {
@@ -46,6 +46,8 @@ public class HttpMain {
             QueryTopologyClient<Object> qUidByUsername = cluster.clusterQuery(AuthModule.class.getName(), "getUserIdByUsername");
             QueryTopologyClient<Object> qCredForUser   = cluster.clusterQuery(AuthModule.class.getName(), "getCredForUser");
             QueryTopologyClient<Object> qValidateRef   = cluster.clusterQuery(AuthModule.class.getName(), "validateRefresh");
+            // NEW: fetch full user by ID
+            QueryTopologyClient<Object> qUserById      = cluster.clusterQuery(AuthModule.class.getName(), "getUserById");
 
             HttpServer http = HttpServer.create(new InetSocketAddress(port), 0);
             http.setExecutor(Executors.newCachedThreadPool());
@@ -69,7 +71,7 @@ public class HttpMain {
 
                 Boolean ok = (Boolean) qCanRegister.invoke(emailLower, userLower);
                 if (ok == null || !ok) {
-                    return Map.of("status", "conflict", "error", "Email or username already taken");
+                    throw new Conflict("Email or username already taken"); // -> 409
                 }
 
                 String pwdHash = AuthFns.sha256Hex(password);
@@ -89,7 +91,7 @@ public class HttpMain {
                         () -> qUidByUsername.invoke(userLower));
 
                 if (userId == null) {
-                    return Map.of("status","accepted");
+                    return Map.of("status","accepted"); // 200 Accepted (lightweight)
                 }
 
                 return Map.of("status","created","userId", userId,"fullName", fullName);
@@ -106,16 +108,16 @@ public class HttpMain {
 
                 String userLower  = AuthFns.lowerTrim(username);
                 Object userId = qUidByUsername.invoke(userLower);
-                if (userId == null) return unauthorized("Invalid username or password");
+                if (userId == null) throw new Unauthorized("Invalid username or password");
 
                 Map cred = (Map) qCredForUser.invoke(userId);
-                if (cred == null) return unauthorized("Invalid username or password");
+                if (cred == null) throw new Unauthorized("Invalid username or password");
 
                 String stored = String.valueOf(cred.get("hash"));
                 String cand   = AuthFns.sha256Hex(password);
-                if (!Objects.equals(stored, cand)) return unauthorized("Invalid username or password");
+                if (!Objects.equals(stored, cand)) throw new Unauthorized("Invalid username or password");
 
-                String access = createAccessToken(secret, (String)userId, username, ACCESS_TTL_MS);
+                String access  = createAccessToken(secret, (String)userId, username, ACCESS_TTL_MS);
                 String refresh = createRefreshToken(secret, (String)userId, username, REFRESH_TTL_MS);
 
                 long expMillis = System.currentTimeMillis() + REFRESH_TTL_MS;
@@ -143,7 +145,7 @@ public class HttpMain {
                 require(nonEmpty(refresh), "refreshToken is required");
 
                 Object userId = qValidateRef.invoke(refresh);
-                if (userId == null) return unauthorized("Invalid or expired refresh token");
+                if (userId == null) throw new Unauthorized("Invalid or expired refresh token");
 
                 String username = str(in.get("username"));
                 if (username == null) username = "user";
@@ -188,7 +190,7 @@ public class HttpMain {
                     String emailLower = AuthFns.lowerTrim(email);
                     Object existing = qUidByEmail.invoke(emailLower);
                     if (existing != null && !Objects.equals(existing, uid)) {
-                        return Map.of("status","conflict","error","Email already in use");
+                        throw new Conflict("Email already in use"); // -> 409
                     }
                 }
 
@@ -218,6 +220,37 @@ public class HttpMain {
                 return Map.of("status","logged_out");
             }));
 
+            // --------------------------
+            // NEW: Get current user (via access token)
+            // --------------------------
+            http.createContext("/api/me", ex -> {
+                if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) {
+                    handleOptions(ex);
+                    return;
+                }
+                if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                    methodNotAllowed(ex, "GET");
+                    return;
+                }
+                try {
+                    String token = getBearerToken(ex);
+                    Map<String,Object> claims = verifyAccessToken(token, secret);
+
+                    String userId = String.valueOf(claims.get("sub"));
+                    Map user = (Map) qUserById.invoke(userId);
+                    if (user == null) {
+                        respond(ex, 404, Map.of("error", "User not found"));
+                        return;
+                    }
+                    respond(ex, 200, Map.of("status", "ok", "user", user));
+                } catch (Unauthorized u) {
+                    respond(ex, 401, Map.of("error", u.getMessage()));
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    respond(ex, 500, Map.of("error", e.toString()));
+                }
+            });
+
             http.start();
             System.out.println("HTTP listening on http://localhost:" + port + "  (Ctrl+C to stop)");
             new CountDownLatch(1).await();
@@ -241,7 +274,7 @@ public class HttpMain {
     @FunctionalInterface
     interface BodyHandler { Map<String,Object> handle(Map<String,Object> in) throws Exception; }
 
-    /** Handles POST/OPTIONS safely with CORS */
+    /** Handles POST/OPTIONS safely with CORS and proper status codes */
     private static void handlePost(HttpExchange ex, BodyHandler fn) throws IOException {
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) {
             handleOptions(ex);
@@ -251,11 +284,13 @@ public class HttpMain {
         try {
             Map<String,Object> in = Json.readMap(ex.getRequestBody());
             Map<String,Object> out = fn.handle(in);
-            respond(ex, 200, out);
+            respond(ex, 200, out); // success stays 200 by default
         } catch (BadReq br) {
             respond(ex, 400, Map.of("error", br.getMessage()));
         } catch (Unauthorized u) {
             respond(ex, 401, Map.of("error", u.getMessage()));
+        } catch (Conflict c) {
+            respond(ex, 409, Map.of("error", c.getMessage()));
         } catch (Exception e) {
             e.printStackTrace();
             respond(ex, 500, Map.of("error", e.toString()));
@@ -327,11 +362,44 @@ public class HttpMain {
         return Jwt.signHS256(payload, secret);
     }
 
+    // Throw instead of returning 200 with an "unauthorized" body
     private static Map<String,Object> unauthorized(String msg){
-        return Map.of("status","unauthorized","error", msg);
+        throw new Unauthorized(msg);
     }
 
+    // ===== Exceptions mapped to HTTP codes =====
     private static class BadReq extends RuntimeException { BadReq(String m) { super(m); } }
     private static class Unauthorized extends RuntimeException { Unauthorized(String m) { super(m); } }
+    private static class Conflict extends RuntimeException { Conflict(String m) { super(m); } }
     private static void require(boolean ok, String msg) { if (!ok) throw new BadReq(msg); }
+
+    // ========= NEW helpers for /api/me =========
+    private static String getBearerToken(HttpExchange ex) {
+        String h = ex.getRequestHeaders().getFirst("Authorization");
+        if (h == null || !h.startsWith("Bearer ")) throw new Unauthorized("Missing Bearer token");
+        String tok = h.substring(7).trim();
+        if (tok.isEmpty()) throw new Unauthorized("Empty Bearer token");
+        return tok;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String,Object> verifyAccessToken(String token, String secret) {
+        Map<String,Object> claims;
+        try {
+            claims = (Map<String,Object>) Jwt.verifyHS256(token, secret);
+        } catch (Exception e) {
+            throw new Unauthorized("Invalid token");
+        }
+        if (claims == null) throw new Unauthorized("Invalid token");
+
+        Object type = claims.get("type");
+        if (!"access".equals(type)) throw new Unauthorized("Token is not an access token");
+
+        Object exp = claims.get("exp"); // seconds
+        long nowSec = System.currentTimeMillis() / 1000L;
+        long expSec = (exp instanceof Number) ? ((Number) exp).longValue() : Long.parseLong(String.valueOf(exp));
+        if (nowSec >= expSec) throw new Unauthorized("Token expired");
+
+        return claims;
+    }
 }

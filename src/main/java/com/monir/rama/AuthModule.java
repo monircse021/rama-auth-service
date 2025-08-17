@@ -1,32 +1,33 @@
 package com.monir.rama;
 
-import com.rpl.rama.*;
+import com.rpl.rama.Block;
+import com.rpl.rama.Depot;
+import com.rpl.rama.Expr;
+import com.rpl.rama.Path;
+import com.rpl.rama.PState;
+import com.rpl.rama.RamaModule;
 import com.rpl.rama.module.StreamTopology;
 import com.rpl.rama.ops.Ops;
 
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * AuthModule for user registration, updates, and refresh token handling.
- * Compatible with Rama 1.1.0 (no jsonSchema helper).
- */
 public class AuthModule implements RamaModule {
 
     @Override
     public void define(Setup setup, Topologies topologies) {
-        // Declare depots (inputs for commands/events)
+        // Depots
         setup.declareDepot("*registration_cmds", Depot.random());
         setup.declareDepot("*auth_events", Depot.random());
 
         // ================== Registration / Users ==================
         StreamTopology reg = topologies.stream("registration");
 
-        // State stores
-        reg.pstate("$$usersById",     PState.mapSchema(String.class, Map.class)); // userId -> userObj
+        // PStates
+        reg.pstate("$$usersById",     PState.mapSchema(String.class, Map.class));   // userId -> userObj
         reg.pstate("$$emailIndex",    PState.mapSchema(String.class, String.class)); // emailLower -> userId
         reg.pstate("$$usernameIndex", PState.mapSchema(String.class, String.class)); // usernameLower -> userId
-        reg.pstate("$$credsByUser",   PState.mapSchema(String.class, Map.class)); // userId -> credObj
+        reg.pstate("$$credsByUser",   PState.mapSchema(String.class, Map.class));    // userId -> credObj
 
         // Handle registration commands
         reg.source("*registration_cmds").out("*e")
@@ -41,16 +42,17 @@ public class AuthModule implements RamaModule {
                                 .each(Ops.GET, "*e", "mobileNumber").out("*mobile")
                                 .each(Ops.GET, "*e", "pwdHash").out("*hash")
 
-                                // Check uniqueness
+                                // Uniqueness checks
                                 .hashPartition("*emailLower")
                                 .localSelect("$$emailIndex", Path.key("*emailLower")).out("*uidEmail")
                                 .hashPartition("*usernameLower")
                                 .localSelect("$$usernameIndex", Path.key("*usernameLower")).out("*uidUser")
                                 .each((String a) -> Boolean.valueOf(a != null), "*uidEmail").out("*emailTaken")
                                 .each((String a) -> Boolean.valueOf(a != null), "*uidUser").out("*userTaken")
-                                .each((Boolean eTaken, Boolean uTaken) -> Boolean.valueOf(!eTaken && !uTaken), "*emailTaken","*userTaken").out("*ok")
+                                .each((Boolean eTaken, Boolean uTaken) -> Boolean.valueOf(!eTaken && !uTaken),
+                                        "*emailTaken","*userTaken").out("*ok")
 
-                                // If available → register user
+                                // Create user if available
                                 .ifTrue(new Expr(Ops.EQUAL, "*ok", true),
                                         Block
                                                 .each(() -> java.util.UUID.randomUUID().toString().replace("-", "")).out("*userId")
@@ -67,8 +69,8 @@ public class AuthModule implements RamaModule {
                                                     u.put("updatedAt", now);
                                                     return u;
                                                 }, "*userId","*usernameLower","*emailLower","*fullName","*mobile","*now").out("*userObj")
-                                                .localTransform("$$usersById", Path.key("*userId").termVal("*userObj"))
-                                                .localTransform("$$emailIndex", Path.key("*emailLower").termVal("*userId"))
+                                                .localTransform("$$usersById",     Path.key("*userId").termVal("*userObj"))
+                                                .localTransform("$$emailIndex",    Path.key("*emailLower").termVal("*userId"))
                                                 .localTransform("$$usernameIndex", Path.key("*usernameLower").termVal("*userId"))
                                                 .each((String hash, Long ts) -> {
                                                     Map<String,Object> c = new HashMap<>();
@@ -77,7 +79,7 @@ public class AuthModule implements RamaModule {
                                                     c.put("ts", ts);
                                                     return c;
                                                 }, "*hash","*now").out("*cred")
-                                                .localTransform("$$credsByUser", Path.key("*userId").termVal("*cred"))
+                                                .localTransform("$$credsByUser",   Path.key("*userId").termVal("*cred"))
                                 )
                 )
 
@@ -111,8 +113,7 @@ public class AuthModule implements RamaModule {
 
         // ================== Auth / Tokens ==================
         StreamTopology auth = topologies.stream("auth");
-        // token -> map(userId, expMillis, revoked)
-        auth.pstate("$$refreshTokens", PState.mapSchema(String.class, Map.class));
+        auth.pstate("$$refreshTokens", PState.mapSchema(String.class, Map.class)); // token -> {userId, expMillis, revoked}
 
         auth.source("*auth_events").out("*e")
                 .each(Ops.GET, "*e", "type").out("*type")
@@ -185,6 +186,12 @@ public class AuthModule implements RamaModule {
                     boolean ok = Boolean.FALSE.equals(rev) && now < expMs;
                     return ok ? r.get("userId") : null;
                 }, "*r","*now").out("*uid")
+                .originPartition();
+
+        // 👇 NEW: full user object by userId
+        topologies.query("getUserById", "*userId").out("*user")
+                .hashPartition("*userId")
+                .localSelect("$$usersById", Path.key("*userId")).out("*user")
                 .originPartition();
     }
 }
