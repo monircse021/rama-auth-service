@@ -1,46 +1,33 @@
 # Rama Auth Service (Rama 1.1.0, JDK 17)
 
-Minimal JWT-based auth service built on **Rama 1.1.0** using the Java API.
+Minimal authentication service using Red Planet Labs **Rama 1.1.0** with:
+- Register (normalize + SHA-256)
+- Login (JWT access + refresh)
+- Refresh token rotation
+- Update user
+- Logout (refresh revoke)
+- `/api/me` (reads Bearer access token)
 
-- Register (fullName, email, username, mobile, password) → **201** `{status,userId,fullName}`
-- Login (username, password) → **200** `{status, userId, username, accessToken, refreshToken}`
-- Refresh → **200** `{status, userId, username, accessToken, refreshToken}`
-- Update user (email/fullName/mobile) → **200** `{status: "updated"}`
-- Logout → **200** `{status: "logged_out"}`
-
-It supports:
-- ✅ User Registration
-- ✅ Login (with JWT access/refresh tokens)
-- ✅ Token Refresh
-- ✅ User Update
-- ✅ Logout
-- ✅ Get Current User (via access token)
-
----
-
-## 🚀 Build
+## Build & Run
 
 ```bash
-mvn -DskipTests clean package
-```
-
----
-
-## ▶️ Run
-
-```bash
-export JWT_SECRET="dhjvbfhjdbvjfdhbjgrjbgmonirdsbvjdfvfd021djhbhjhfbgnvndf001ndjdg"
+export JWT_SECRET=bfhfhjmanha021wheffhjermonir
 export ACCESS_TTL_MIN=10
 export REFRESH_TTL_DAYS=7
 export PORT=8080
 
-java -jar target/auth-service-jar-with-dependencies.jar
+mvn -q -DskipTests package
+java -jar target/rama-auth-service-1.0.0-SNAPSHOT-shaded.jar
 ```
 
-Server starts at:
-```
-http://localhost:8080
-```
+## API
+
+- `POST /api/register` → `201 created` or `202 accepted` or `409 conflict`
+- `POST /api/login` → `200 ok` with tokens
+- `POST /api/token/refresh` → `200 ok` with rotated tokens
+- `POST /api/user/update` → `200 updated` or `409 conflict`
+- `POST /api/logout` → `204 no content`
+- `GET /api/me` (Authorization: Bearer) → `200 ok` user json
 
 ---
 
@@ -235,64 +222,8 @@ curl -X GET http://localhost:8080/api/me \
 {"error":"User not found"}
 ```
 
----
+## Notes
 
-## ⚡ Quick End-to-End Test
-
-```bash
-# 1) Register
-curl -s -X POST http://localhost:8080/api/register \
-  -H "Content-Type: application/json" \
-  -d '{"fullName":"Alice","email":"alice@example.com","username":"alice","mobileNumber":"+88017777777","password":"secret"}'
-
-# 2) Login (capture tokens)
-LOGIN_JSON=$(curl -s -X POST http://localhost:8080/api/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"secret"}')
-
-ACCESS=$(echo "$LOGIN_JSON" | python - <<'PY'
-import sys, json
-print(json.load(sys.stdin).get("accessToken",""))
-PY
-)
-
-REFRESH=$(echo "$LOGIN_JSON" | python - <<'PY'
-import sys, json
-print(json.load(sys.stdin).get("refreshToken",""))
-PY
-)
-
-echo "ACCESS=$ACCESS"
-echo "REFRESH=$REFRESH"
-
-# 3) Hit protected endpoint /api/me
-curl -s -X GET http://localhost:8080/api/me \
-  -H "Authorization: Bearer $ACCESS" \
-  -H "Content-Type: application/json"
-
-# 4) Refresh tokens
-curl -s -X POST http://localhost:8080/api/token/refresh \
-  -H "Content-Type: application/json" \
-  -d "{\"refreshToken\":\"$REFRESH\",\"username\":\"alice\"}"
-```
-
----
-
-## 🛠️ Troubleshooting
-
-- **409 Conflict on Register/Update**  
-  Email or username already exists in the system.
-
-- **401 Unauthorized on Login**  
-  Username not found or password hash mismatch.
-
-- **401 on /api/me**  
-  Access token missing/invalid/expired. Log in again or refresh the token.
-
-- **404 on /api/me**  
-  Token is valid but user record not found (unlikely unless data was pruned).
-
----
-
-## 📎 Notes
-- The service uses **Rama InProcessCluster** for quick local runs.
+- Uses `InProcessCluster` for dev. Swap to your cluster when ready.
+- PStates use `PState.mapSchema` only (Rama 1.1.0 compatible).
+- Returns real HTTP codes to simplify frontend error handling.
