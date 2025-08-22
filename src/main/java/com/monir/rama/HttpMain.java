@@ -44,7 +44,8 @@ public class HttpMain {
         log.info("Starting rama-auth-service...");
         log.info("HTTP port={}  ACCESS_TTL_MIN={}  REFRESH_TTL_DAYS={}", port, accessTtlMin, refreshTtlDays);
 
-        try (InProcessCluster cluster = InProcessCluster.create()) {
+
+        try (InProcessCluster cluster = InProcessCluster.create()) { // LocalCluster cluster = LocalCluster.create("/tmp/rama-data")
             log.info("Launching Rama module: {}", AuthModule.class.getName());
             long t0 = System.nanoTime();
             cluster.launchModule(new AuthModule(), new LaunchConfig(1, 1));
